@@ -6,7 +6,9 @@ use InstagramScraper\Exception\Instagram2FactorException;
 use InstagramScraper\Exception\InstagramAuthException;
 use InstagramScraper\Exception\InstagramException;
 use InstagramScraper\Exception\InstagramNotFoundException;
+use InstagramScraper\Exception\InstagramAgeRestrictedException;
 use InstagramScraper\Model\Account;
+use InstagramScraper\Model\Activity;
 use InstagramScraper\Model\Comment;
 use InstagramScraper\Model\Like;
 use InstagramScraper\Model\Location;
@@ -43,7 +45,7 @@ class Instagram
 
     const NETWORK_TIMEOUT = 10; // 10 seconds default timeout
 
-    const DEFAULT_USERAGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/66.0.3359.139 Safari/537.36';
+    const DEFAULT_USERAGENT = 'Mozilla/5.0 (Linux; Android 8.1.0; motorola one Build/OPKS28.63-18-3; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/70.0.3538.80 Mobile Safari/537.36 Instagram 72.0.0.21.98 Android (27/8.1.0; 320dpi; 720x1362; motorola; motorola one; deen_sprout; qcom; pt_BR; 132081645)';
 
     /** @var CacheInterface $instanceCache */
     private static $instanceCache = null;
@@ -636,6 +638,32 @@ class Instagram
     }
 
     /**
+     * Gets logged user activity.
+     *
+     * @throws     \InstagramScraper\Exception\InstagramException
+     * @throws     \InstagramScraper\Exception\InstagramNotFoundException
+     *
+     * @return     Activity
+     */
+    public function getActivity()
+    {
+        $response = Request::get(Endpoints::getActivityUrl(),
+            $this->generateHeaders($this->userSession));
+
+        if ($response->code === static::HTTP_NOT_FOUND) {
+            throw new InstagramNotFoundException('Account with given username does not exist.');
+        }
+        if ($response->code !== static::HTTP_OK) {
+            throw new InstagramException('Response code is ' . $response->code . '. Body: ' . static::getErrorBody($response->body) . ' Something went wrong. Please report issue.');
+        }
+
+        $this->parseCookies($response->headers);
+        $jsonResponse = $this->decodeRawBodyToJson($response->raw_body);
+
+        return Activity::create((array)@$jsonResponse['graphql']['user']['activity_feed']);
+    }
+
+    /**
      * @param string $username
      * @param int $count
      * @param string $maxId
@@ -664,8 +692,12 @@ class Instagram
 
         $userArray = self::extractSharedDataFromBody($response);
 
+        if ($this->isAccountAgeRestricted($userArray, $response)) {
+            throw new InstagramAgeRestrictedException('Account with given username is age-restricted.');
+        }
+
         if (!isset($userArray['entry_data']['ProfilePage'][0]['graphql']['user'])) {
-            throw new InstagramNotFoundException('Account with this username does not exist');
+            throw new InstagramException('Response code is ' . $response->code . '. Body: ' . static::getErrorBody($response->body) . ' Something went wrong. Please report issue.', $response->code);
         }
         return Account::create($userArray['entry_data']['ProfilePage'][0]['graphql']['user']);
     }
@@ -676,6 +708,15 @@ class Instagram
             return json_decode($out[1][0], true, 512, JSON_BIGINT_AS_STRING);
         }
         return null;
+    }
+
+    private function isAccountAgeRestricted($userArray, $body)
+    {
+        if ($userArray === null && strpos($body, '<h2>Restricted profile</h2>') !== false) {
+            return true;
+        }
+
+        return false;
     }
 
     /**
@@ -772,7 +813,7 @@ class Instagram
         $userArray = $this->decodeRawBodyToJson($response);
 
         if (!isset($userArray['graphql']['user'])) {
-            throw new InstagramNotFoundException('Account with this username does not exist');
+            throw new InstagramException('Response code is ' . $response->code . '. Body: ' . static::getErrorBody($response->body) . ' Something went wrong. Please report issue.', $response->code);
         }
 
         $nodes = $userArray['graphql']['user']['edge_owner_to_timeline_media']['edges'];
@@ -871,7 +912,8 @@ class Instagram
      */
     public function getPaginateMediasByUserId($id, $count = 12, $maxId = '')
     {
-        $hasNextPage = false;
+        $index = 0;
+        $hasNextPage = true;
         $medias = [];
 
         $toReturn = [
@@ -880,11 +922,12 @@ class Instagram
             'hasNextPage' => $hasNextPage,
         ];
 
-        $variables = json_encode([
-            'id' => (string)$id,
-            'first' => (string)$count,
-            'after' => (string)$maxId
-        ]);
+        while ($index < $count && $hasNextPage) {
+            $variables = json_encode([
+                'id' => (string)$id,
+                'first' => (string)$count,
+                'after' => (string)$maxId
+            ]);
 
         $response = $this->makeRequest('GET', Endpoints::getAccountMediasJsonLink($variables));
 
@@ -893,22 +936,26 @@ class Instagram
         if (!is_array($arr)) {
             throw new InstagramException('Something went wrong. Please report issue. Unable to decode response.');
         }
+            $nodes = $arr['data']['user']['edge_owner_to_timeline_media']['edges'];
 
-        $nodes = $arr['data']['user']['edge_owner_to_timeline_media']['edges'];
+            //if (count($arr['items']) === 0) {
+            // I generally use empty. Im not sure why people would use count really - If the array is large then count takes longer/has more overhead.
+            // If you simply need to know whether or not the array is empty then use empty.
+            if (empty($nodes)) {
+                return $toReturn;
+            }
 
-        //if (count($arr['items']) === 0) {
-        // I generally use empty. Im not sure why people would use count really - If the array is large then count takes longer/has more overhead.
-        // If you simply need to know whether or not the array is empty then use empty.
-        if (empty($nodes)) {
-            return $toReturn;
+            foreach ($nodes as $mediaArray) {
+                if ($index === $count) {
+                    return $medias;
+                }
+                $medias[] = Media::create($mediaArray['node']);
+                $index++;
+            }
+
+            $maxId = $arr['data']['user']['edge_owner_to_timeline_media']['page_info']['end_cursor'];
+            $hasNextPage = $arr['data']['user']['edge_owner_to_timeline_media']['page_info']['has_next_page'];
         }
-
-        foreach ($nodes as $mediaArray) {
-            $medias[] = Media::create($mediaArray['node']);
-        }
-
-        $maxId = $arr['data']['user']['edge_owner_to_timeline_media']['page_info']['end_cursor'];
-        $hasNextPage = $arr['data']['user']['edge_owner_to_timeline_media']['page_info']['has_next_page'];
 
         $toReturn = [
             'medias' => $medias,
@@ -947,43 +994,39 @@ class Instagram
         $index = 0;
         $hasPrevious = true;
         while ($hasPrevious && $index < $count) {
-            if (!isset($maxId)) {
-                $maxId = '';
-            }
             if ($count - $index > static::MAX_COMMENTS_PER_REQUEST) {
-                $numberOfCommentsToRetreive = static::MAX_COMMENTS_PER_REQUEST;
+                $numberOfCommentsToRetrieve = static::MAX_COMMENTS_PER_REQUEST;
             } else {
-                $numberOfCommentsToRetreive = $count - $index;
+                $numberOfCommentsToRetrieve = $count - $index;
             }
 
             $variables = json_encode([
                 'shortcode' => (string)$code,
-                'first' => (string)$numberOfCommentsToRetreive,
+                'first' => (string)$numberOfCommentsToRetrieve,
                 'after' => (string)$maxId
             ]);
 
             $commentsUrl = Endpoints::getCommentsBeforeCommentIdByCode($variables);
             $response = $this->makeRequest('GET', $commentsUrl, []);
             $jsonResponse = $this->decodeRawBodyToJson($response);
+
             $nodes = $jsonResponse['data']['shortcode_media']['edge_media_to_comment']['edges'];
-            if (empty($nodes)) {
-                return [];
+            $hasPrevious = $jsonResponse['data']['shortcode_media']['edge_media_to_comment']['page_info']['has_next_page'];
+            $numberOfComments = $jsonResponse['data']['shortcode_media']['edge_media_to_comment']['count'];
+            $maxId = $jsonResponse['data']['shortcode_media']['edge_media_to_comment']['page_info']['end_cursor'];
+
+            if (empty($nodes) && $numberOfComments === 0) {
+                break;
             }
 
             foreach ($nodes as $commentArray) {
                 $comments[] = Comment::create($commentArray['node']);
                 $index++;
             }
-            $hasPrevious = $jsonResponse['data']['shortcode_media']['edge_media_to_comment']['page_info']['has_next_page'];
-
-            $numberOfComments = $jsonResponse['data']['shortcode_media']['edge_media_to_comment']['count'];
+            
             if ($count > $numberOfComments) {
                 $count = $numberOfComments;
             }
-            if (sizeof($nodes) == 0) {
-                return $comments;
-            }
-            $maxId = $jsonResponse['data']['shortcode_media']['edge_media_to_comment']['page_info']['end_cursor'];
         }
         return $comments;
     }
@@ -1044,7 +1087,7 @@ class Instagram
         return $likes;
     }
 
-    /**
+     /**
      * @param string $id
      *
      * @return Account
@@ -1066,17 +1109,26 @@ class Instagram
      */
     public function getUsernameById($id)
     {
+        $privateInfo = $this->getAccountPrivateInfo($id);
+        return $privateInfo['username'];
+    }
+
+    /**
+     * @param string $id
+     * @return array
+     * @throws InstagramException
+     * @throws InstagramNotFoundException
+     */
+    public function getAccountPrivateInfo($id)
+    {
         $response = $this->makeRequest('GET', Endpoints::getAccountJsonPrivateInfoLinkByAccountId($id), [], 'Failed to fetch account with given id');
+        $userArray = $this->decodeRawBodyToJson($response);
 
-        if (!($responseArray = json_decode($response, true))) {
-            throw new InstagramException('Response does not JSON');
+        if ($userArray['status'] !== 'ok') {
+            throw new InstagramException((isset($userArray['message']) ? $userArray['message'] : 'Unknown Error'));
         }
 
-        if ($responseArray['status'] !== 'ok') {
-            throw new InstagramException((isset($responseArray['message']) ? $responseArray['message'] : 'Unknown Error'));
-        }
-
-        return $responseArray['user']['username'];
+        return $userArray['user'];
     }
 
     /**
@@ -1333,6 +1385,7 @@ class Instagram
         return Location::create($jsonResponse['graphql']['location']);
     }
 
+    
     /**
      * @param string $accountId Account id of the profile to query
      * @param int $count Total followers to retrieve
@@ -1345,13 +1398,31 @@ class Instagram
      */
     public function getFollowers($accountId, $count = 20, $pageSize = 20, $delayed = true)
     {
+        $result = $this->getPaginateFollowers($accountId, $count, $pageSize, $delayed, '');
+        return $result['accounts'];
+    }
+
+    /**
+     * @param string $accountId Account id of the profile to query
+     * @param int $count Total followers to retrieve
+     * @param int $pageSize Internal page size for pagination
+     * @param bool $delayed Use random delay between requests to mimic browser behaviour
+     * @param bool $nextPage Use to paginate results (ontop of internal pagination)
+     *
+     * @return array
+     * @throws InstagramException
+     * @throws InstagramNotFoundException
+     */
+    public function getPaginateFollowers($accountId, $count = 20, $pageSize = 20, $delayed = true, $nextPage = '')
+    {
         if ($delayed) {
             set_time_limit($this->pagingTimeLimitSec);
         }
 
         $index = 0;
         $accounts = [];
-        $endCursor = '';
+        $endCursor = $nextPage;
+        $lastPagingInfo = [];
 
         if ($count < $pageSize) {
             throw new InstagramException('Count must be greater than or equal to page size.');
@@ -1370,7 +1441,7 @@ class Instagram
             if (count($edgesArray) === 0) {
                 throw new InstagramException('Failed to get followers of account id ' . $accountId . '. The account is private.', static::HTTP_FORBIDDEN);
             }
-
+           
             foreach ($edgesArray as $edge) {
                 $accounts[] = $edge['node'];
                 $index++;
@@ -1378,8 +1449,8 @@ class Instagram
                     break 2;
                 }
             }
-
             $pageInfo = $jsonResponse['data']['user']['edge_followed_by']['page_info'];
+            $lastPagingInfo = $pageInfo;
             if ($pageInfo['has_next_page']) {
                 $endCursor = $pageInfo['end_cursor'];
             } else {
@@ -1392,10 +1463,15 @@ class Instagram
                 usleep($microsec);
             }
         }
-        return $accounts;
+        $toReturn = [
+            'hasNextPage' => $lastPagingInfo['has_next_page'], 
+            'nextPage' => $lastPagingInfo['end_cursor'],
+            'accounts' => $accounts
+        ];
+        return $toReturn;
     }
 
-    /**
+        /**
      * @param string $accountId Account id of the profile to query
      * @param int $count Total followed accounts to retrieve
      * @param int $pageSize Internal page size for pagination
@@ -1405,7 +1481,24 @@ class Instagram
      * @throws InstagramException
      * @throws InstagramNotFoundException
      */
-    public function getFollowing($accountId, $count = 20, $pageSize = 20, $delayed = true)
+     public function getFollowing($accountId, $count = 20, $pageSize = 20, $delayed = true )
+     {
+        $res = $this->getPaginateFollowing($accountId, $count, $pageSize, $delayed,  '');
+        return $res;
+	 }
+
+    /**
+     * @param string $accountId Account id of the profile to query
+     * @param int $count Total followed accounts to retrieve
+     * @param int $pageSize Internal page size for pagination
+     * @param bool $delayed Use random delay between requests to mimic browser behaviour
+     * @param bool $nextPage Use to paginate results (ontop of internal pagination)
+     *
+     * @return array
+     * @throws InstagramException
+     * @throws InstagramNotFoundException
+     */
+    public function getPaginateFollowing($accountId, $count = 20, $pageSize = 20, $delayed = true,$nextPage = '')
     {
         if ($delayed) {
             set_time_limit($this->pagingTimeLimitSec);
@@ -1414,6 +1507,7 @@ class Instagram
         $index = 0;
         $accounts = [];
         $endCursor = '';
+        $lastPagingInfo = [];
 
         if ($count < $pageSize) {
             throw new InstagramException('Count must be greater than or equal to page size.');
@@ -1442,6 +1536,7 @@ class Instagram
             }
 
             $pageInfo = $jsonResponse['data']['user']['edge_follow']['page_info'];
+            $lastPagingInfo = $pageInfo;
             if ($pageInfo['has_next_page']) {
                 $endCursor = $pageInfo['end_cursor'];
             } else {
@@ -1454,7 +1549,12 @@ class Instagram
                 usleep($microsec);
             }
         }
-        return $accounts;
+        $toReturn = [
+            'hasNextPage' => $lastPagingInfo['has_next_page'], 
+            'nextPage' => $lastPagingInfo['end_cursor'], 
+            'accounts' => $accounts
+         ];
+        return $toReturn;
     }
 
     /**
@@ -1633,7 +1733,7 @@ class Instagram
             }
         }
 
-        if (!preg_match('/name="security_code"/', $response->raw_body, $matches)) {
+        if (!preg_match('/"input_name":"security_code"/', $response->raw_body, $matches)) {
             throw new InstagramAuthException('Something went wrong when try two step verification. Please report issue.', $response->code);
         }
 

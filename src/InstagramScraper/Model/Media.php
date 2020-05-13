@@ -216,7 +216,7 @@ class Media extends AbstractModel
         while ($id > 0) {
             $remainder = $id % 64;
             $id = ($id - $remainder) / 64;
-            $code = $alphabet{$remainder} . $code;
+            $code = $alphabet[$remainder] . $code;
         };
         return $code;
     }
@@ -551,7 +551,7 @@ class Media extends AbstractModel
                 $this->caption = $arr[$prop];
                 break;
             case 'accessibility_caption':
-                $this->caption = $value;
+                $this->altText = $value;
                 break;
             case 'video_views':
                 $this->videoViews = $value;
@@ -573,10 +573,12 @@ class Media extends AbstractModel
                 }
                 break;
             case 'location':
-                $this->locationId = $arr[$prop]['id'];
-                $this->locationName = $arr[$prop]['name'];
-                $this->locationSlug = $arr[$prop]['slug'];
-                $this->locationAddressJson = isset($arr[$prop]['address_json']) ? $arr[$prop]['address_json'] : null;
+                if(isset($arr[$prop])) {
+                    $this->locationId = $arr[$prop]['id'] ? $arr[$prop]['id'] : null;
+                    $this->locationName = $arr[$prop]['name'] ? $arr[$prop]['name'] : null;
+                    $this->locationSlug = $arr[$prop]['slug'] ? $arr[$prop]['slug'] : null;
+                    $this->locationAddressJson = isset($arr[$prop]['address_json']) ? $arr[$prop]['address_json'] : null;
+                }
                 break;
             case 'user':
                 $this->owner = Account::create($arr[$prop]);
