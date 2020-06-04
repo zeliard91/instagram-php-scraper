@@ -156,7 +156,7 @@ class Instagram
 
         try {
             $response = $this->client->request($method, $url, $options);
-            if ($response->getStatusCode() === static::HTTP_REDIRECT_PERMANENT && $response->getHeaders()['Location'][0] === Endpoints::BASE_LOGIN_URL) {
+            if ($response->getStatusCode() === static::HTTP_REDIRECT_PERMANENT && strpos($response->getHeaders()['Location'][0], Endpoints::BASE_LOGIN_URL) === 0) {
                 $this->markFailRequest();
                 if ($this->canRetry()) {
                     return $this->makeRequest($method, $url, $options, $notFoundMessage, $accessDeniedMessage);
