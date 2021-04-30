@@ -45,7 +45,7 @@ class Instagram
 
     const NETWORK_TIMEOUT = 10; // 10 seconds default timeout
 
-    const DEFAULT_USERAGENT = 'Mozilla/5.0 (Linux; Android 8.1.0; motorola one Build/OPKS28.63-18-3; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/70.0.3538.80 Mobile Safari/537.36 Instagram 72.0.0.21.98 Android (27/8.1.0; 320dpi; 720x1362; motorola; motorola one; deen_sprout; qcom; pt_BR; 132081645)';
+    const DEFAULT_USERAGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/84.0.4147.89 Safari/537.36';
 
     /** @var CacheInterface $instanceCache */
     private static $instanceCache = null;
@@ -150,6 +150,9 @@ class Instagram
                 $options['headers'] = [];
             }
             $options['headers']['x-csrftoken'] = $cookie->getValue();
+        }
+        if (empty($options['headers']['x-csrftoken'])) {
+            $options['headers']['x-csrftoken'] = md5(uniqid());;
         }
 
         $options = $this->defineProxyOption($options);
@@ -697,7 +700,7 @@ class Instagram
         }
 
         if (!isset($userArray['entry_data']['ProfilePage'][0]['graphql']['user'])) {
-            throw new InstagramException('Response code is ' . $response->code . '. Body: ' . static::getErrorBody($response->body) . ' Something went wrong. Please report issue.', $response->code);
+            throw new InstagramException('Unable to extract data from response : '. $response);
         }
         return Account::create($userArray['entry_data']['ProfilePage'][0]['graphql']['user']);
     }
@@ -1124,11 +1127,15 @@ class Instagram
         $response = $this->makeRequest('GET', Endpoints::getAccountJsonPrivateInfoLinkByAccountId($id), [], 'Failed to fetch account with given id');
         $userArray = $this->decodeRawBodyToJson($response);
 
+        if ($userArray['data']['user'] === null){
+            throw new InstagramNotFoundException('Failed to fetch account with given id');
+        }
+
         if ($userArray['status'] !== 'ok') {
             throw new InstagramException((isset($userArray['message']) ? $userArray['message'] : 'Unknown Error'));
         }
 
-        return $userArray['user'];
+        return $userArray['data']['user']['reel']['user'];;
     }
 
     /**
